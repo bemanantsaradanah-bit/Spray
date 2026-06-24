@@ -3,6 +3,11 @@ from flask_socketio import SocketIO, emit
 import os
 from datetime import datetime
 import sys
+# les modification en bas
+from engineio.async_drivers import threading
+import logging
+log = logging.getLogger('werkzeug')
+log.setLevel(logging.ERROR)
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'secret!'
@@ -10,14 +15,22 @@ socketio = SocketIO(
     app, 
     cors_allowed_origins="*", 
     async_mode='threading',
-    ping_timeout=60,
-    ping_interval=25
+    #ping_timeout=60,
+    #ping_interval=25
+    ping_timeout=10,#modification
+    ping_interval=5,#modification
+    logger=False,#modification
+    engineio_logger=False,#modification
+    always_connect=True,#modification
+    transports=['websocket', 'polling']#modification
+    
 )
 
 # Stocker les dernières données
 last_data = {
     "temperature": "--",
     "humidity": "--",
+    "device": "ESP32",#modification
     "time": "En attente..."
 }
 
@@ -94,21 +107,21 @@ HTML_PAGE = """
             font-size: 14px;
         }
         .pulse {
-            animation: pulse 2s infinite;
+            animation: pulse 0.5s ease-in-out;
         }
         @keyframes pulse {
-            0% { opacity: 1; }
-            50% { opacity: 0.5; }
-            100% { opacity: 1; }
+            0% { transform: scale(1); }
+            50% { transform: scale(1.1); }
+            100% { transform: scale(1); }
         }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>🌡️ Moniteur DHT</h1>
+        <h1>🌡️ Moniteur DHT - Temps Réel</h1>
         
         <div class="status" id="status">
-            <span id="statusText" class="offline">🔴 En attente de connexion...</span>
+            <span id="statusText" class="offline">🔴 En attente...</span>
         </div>
         
         <div class="sensor-card">
@@ -129,36 +142,57 @@ HTML_PAGE = """
     </div>
 
     <script>
-        const socket = io();
+        // Configuration de la connexion Socket.IO
+        const socket = io({
+            transports: ['websocket', 'polling'],
+            reconnection: true,
+            reconnectionDelay: 1000,
+            reconnectionAttempts: Infinity
+        });
         
         socket.on('connect', function() {
+            console.log('✅ Connecté au serveur');
             document.getElementById('statusText').className = 'online';
-            document.getElementById('statusText').innerHTML = '🟢 Connecté en temps réel';
+            document.getElementById('statusText').innerHTML = '🟢 Connecté - Temps réel actif';
         });
         
-        socket.on('disconnect', function() {
+        socket.on('disconnect', function(reason) {
+            console.log('❌ Déconnecté:', reason);
             document.getElementById('statusText').className = 'offline';
-            document.getElementById('statusText').innerHTML = '🔴 Déconnecté';
+            document.getElementById('statusText').innerHTML = '🔴 Déconnecté - Reconnexion...';
         });
         
+        socket.on('connect_error', function(error) {
+            console.log('❌ Erreur de connexion:', error);
+            document.getElementById('statusText').className = 'offline';
+            document.getElementById('statusText').innerHTML = '🔴 Erreur de connexion';
+        });
+        
+        // Écouter les mises à jour des capteurs
         socket.on('update_sensor', function(data) {
-            // Mettre à jour température
-            document.getElementById('temperature').textContent = data.temperature + '°C';
-            // Animation
-            document.getElementById('temperature').classList.add('pulse');
-            setTimeout(() => {
-                document.getElementById('temperature').classList.remove('pulse');
-            }, 1000);
+            console.log('📩 Données reçues:', data);
             
-            // Mettre à jour humidité
-            document.getElementById('humidity').textContent = data.humidity + '%';
-            document.getElementById('humidity').classList.add('pulse');
-            setTimeout(() => {
-                document.getElementById('humidity').classList.remove('pulse');
-            }, 1000);
+            // Animation de mise à jour
+            const tempEl = document.getElementById('temperature');
+            const humEl = document.getElementById('humidity');
             
-            // Mettre à jour le temps
+            tempEl.textContent = data.temperature + '°C';
+            tempEl.classList.add('pulse');
+            setTimeout(() => tempEl.classList.remove('pulse'), 500);
+            
+            humEl.textContent = data.humidity + '%';
+            humEl.classList.add('pulse');
+            setTimeout(() => humEl.classList.remove('pulse'), 500);
+            
             document.getElementById('updateTime').textContent = data.time;
+        });
+        
+        // Optionnel: Demander les dernières données à la connexion
+        socket.on('last_data', function(data) {
+            console.log('📦 Données initiales:', data);
+             document.getElementById('temperature').textContent = data.temperature + '°C';
+             document.getElementById('humidity').textContent = data.humidity + '%';
+             document.getElementById('updateTime').textContent = data.time;
         });
     </script>
 </body>
@@ -171,13 +205,17 @@ def index():
 
 @socketio.on('connect')
 def connect():
-    print("✅ Client connecté!", flush=True)
+    #print("✅ Client connecté!", flush=True)
+    print(f"✅ Client connecté! SID: {request.sid}", flush=True)#modification
     sys.stdout.flush()
     emit('update_sensor', last_data)
+    if last_data.get('temperature') != '--':#modification
+        emit('update_sensor', last_data)#modification
 
 @socketio.on('sensor_data')
 def handle_sensor_data(data):
     global last_data
+    print(f"📩 Données brutes reçues: {data}", flush=True)#modification
     last_data = {
         "temperature": data.get('temperature', 0),
         "humidity": data.get('humidity', 0),
@@ -189,14 +227,22 @@ def handle_sensor_data(data):
     sys.stdout.flush()
     
     # Broadcast à tous les clients connectés
-    socketio.emit('update_sensor', last_data, broadcast=True)
-
+    #socketio.emit('update_sensor', last_data, broadcast=True)
+    socketio.emit('update_sensor', last_data, broadcast=True, include_self=True)#modification
+    return "OK"
 @socketio.on('disconnect')
 def disconnect():
     print("❌ Client déconnecté!", flush=True)
+    #print(f"❌ Client déconnecté! SID: {request.sid}", flush=True)
     sys.stdout.flush()
+
+@socketio.on_error()#modification
+def error_handler(e):#modification
+    print(f"❌ Erreur: {str(e)}", flush=True)#modification
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     print(f"🚀 Serveur DHT démarré sur port {port}", flush=True)
-    socketio.run(app, host='0.0.0.0', port=port, debug=False)
+    print(f"📡 En attente des connexions ESP32...", flush=True)
+    #socketio.run(app, host='0.0.0.0', port=port, debug=False)
+    socketio.run(app, host='0.0.0.0', port=port, debug=False, use_reloader=False)
