@@ -1,0 +1,1 @@
+web: gunicorn --worker-class gthread --threads 10 -w 1 Spray:app
